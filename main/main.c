@@ -1,12 +1,9 @@
-/*
-TODO
-- Configure as usb device
-- Take audio from host, send to DAC thru i2s
+// Brody Fiorito 2026
 
+/* TODO: 
+ - Test on dev kit and oscilliscope
 
 */
-
-
 
 #include <stdio.h>
 #include <driver/uart.h>
@@ -19,7 +16,10 @@ TODO
 #include <esp_adc/adc_cali_scheme.h>
 #include <esp_adc/adc_oneshot.h>
 #include <math.h>
+#include <usb_device_uac.h>
+#include <freertos/ringbuf.h>
 
+// Hardware Pins
 
 #define LRCK_PIN GPIO_NUM_35
 #define DOUT_PIN GPIO_NUM_36
@@ -30,20 +30,26 @@ TODO
 #define FREQ_PIN GPIO_NUM_5
 #define MODE_SWITCH_PIN GPIO_NUM_9
 
+// Software Variables
+
 #define BUF_SIZE 1024
-
 #define PI 3.14159265358979
+#define UAC_RX_BUFSIZE 4096
 
-float freqRatio;
-float phaseDiff;
+static RingbufHandle_t audio_ringbuf = NULL;
+
+static i2s_chan_handle_t tx_chan;
+
+volatile float freqRatio;
+volatile float phaseDiff;
 
 typedef struct {
     int last_raw;
     float smooth;
 } adc_ctrl_t;
 
-adc_ctrl_t freq_ctrl = { .last_raw = -1 };
-adc_ctrl_t phase_ctrl = { .last_raw = -1 };
+adc_ctrl_t freq_ctrl = { .last_raw = 0, .smooth = 0 };
+adc_ctrl_t phase_ctrl = { .last_raw = 0, .smooth = 0 };
 
 typedef enum {
     MODE_LISSAJOUS = 0,
@@ -57,6 +63,7 @@ TaskHandle_t i2s_handle = NULL;
 static system_state_t current_mode = MODE_LISSAJOUS;
 static system_state_t requested_mode = MODE_LISSAJOUS;
 
+// Function prototypes
 
 void adc_task(void *arg);
 void i2s_task(void *arg);
@@ -65,14 +72,13 @@ int adc_hysteresis(adc_ctrl_t *c, int);
 float adc_smooth(adc_ctrl_t *c, int);
 float get_ratio(float);
 float get_phase_diff(float);
+static esp_err_t uac_output_callback(uint8_t *buf, size_t len, void *cb_ctx);
 void enter_mode(system_state_t);
 static system_state_t read_mode_switch(void);
 
 
 
 void i2s_task (void *arg) {
-    
-    i2s_chan_handle_t tx_chan;
 
     i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(
         I2S_NUM_0,
@@ -120,9 +126,6 @@ void i2s_task (void *arg) {
 
             for (int i = 0; i < BUFFER_SIZE; i++) {
 
-                phaseDiff = 0;
-                freqRatio = 2;
-
                 float fL = base_freq;
                 float fR = base_freq * freqRatio;
 
@@ -145,6 +148,25 @@ void i2s_task (void *arg) {
         vTaskDelay(1);
 
         } else if (current_mode == MODE_AUDIO_INPUT) {
+
+            if (audio_ringbuf == NULL) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            size_t bytes_available;
+            uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(
+                audio_ringbuf,
+                &bytes_available,
+                pdMS_TO_TICKS(20),
+                sizeof(buffer)
+            );
+
+            if (data && bytes_available > 0) {
+                size_t bytes_written;
+                i2s_channel_write(tx_chan, data, bytes_available, &bytes_written, portMAX_DELAY);
+                vRingbufferReturnItem(audio_ringbuf, data);
+            }
 
 
 
@@ -251,13 +273,22 @@ void adc_task(void *arg) {
 
 void audio_input_task(void *arg) {
 
+    // Make ring buffer
+    audio_ringbuf = xRingbufferCreate(UAC_RX_BUFSIZE, RINGBUF_TYPE_BYTEBUF);
 
+    // Configure and start UAC
+    uac_device_config_t uac_cfg = {
+        .output_cb = uac_output_callback,
+        .input_cb = NULL,
+        .set_mute_cb = NULL,
+        .set_volume_cb = NULL,
+        .cb_ctx = NULL,
+    };
 
+    uac_device_init(&uac_cfg);
 
     while (1) {
-
-
-        vTaskDelay(1);
+        vTaskDelay(portMAX_DELAY);
     }
 
 
@@ -369,7 +400,14 @@ float get_phase_diff(float phase_norm) {
 
 }
 
+static esp_err_t uac_output_callback(uint8_t *buf, size_t len, void *arg) {
 
+    if (audio_ringbuf) {
+        xRingbufferSend(audio_ringbuf, buf, len, 0);
+    }
+
+    return ESP_OK;
+}
 
 
 
@@ -386,6 +424,11 @@ void enter_mode(system_state_t mode) {
         vTaskDelete(audio_input_handle);
         audio_input_handle = NULL;
     }
+
+    if (audio_ringbuf) {
+    vRingbufferDelete(audio_ringbuf);
+    audio_ringbuf = NULL;
+}
 
     switch (mode) {
 
