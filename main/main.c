@@ -1,9 +1,8 @@
 // Brody Fiorito 2026
-
-/* TODO: 
- - Test on dev kit and oscilliscope
-
-*/
+// Lissajous Box - main.c
+// Generates stereo sine waves with adjustable frequency ratio and phase offset
+// for Lissajous figure display. 
+// Also supports USB audio passthrough mode for music visualization.
 
 #include <stdio.h>
 #include <driver/uart.h>
@@ -28,20 +27,22 @@
 
 #define PHASE_PIN GPIO_NUM_4
 #define FREQ_PIN GPIO_NUM_5
+#define PHASE_ADC_CHANNEL ADC_CHANNEL_3
+#define FREQ_ADC_CHANNEL ADC_CHANNEL_4
 #define MODE_SWITCH_PIN GPIO_NUM_9
 
-// Software Variables
-
-#define BUF_SIZE 1024
+// Constants
 #define PI 3.14159265358979
 #define UAC_RX_BUFSIZE 4096
+#define ADC_MV_MAX 3200.0f
 
+// Global State
 static RingbufHandle_t audio_ringbuf = NULL;
 
 static i2s_chan_handle_t tx_chan;
 
-volatile float freqRatio;
-volatile float phaseDiff;
+volatile float freqRatio;   // Shared between i2s_task and adc_task. Volatile prevents the compiler
+volatile float phaseDiff;   // from optimizing reads into a register, ensuring the latest value is always used.
 
 typedef struct {
     int last_raw;
@@ -64,7 +65,6 @@ static system_state_t current_mode = MODE_LISSAJOUS;
 static system_state_t requested_mode = MODE_LISSAJOUS;
 
 // Function prototypes
-
 void adc_task(void *arg);
 void i2s_task(void *arg);
 void audio_input_task(void *arg);
@@ -75,7 +75,6 @@ float get_phase_diff(float);
 static esp_err_t uac_output_callback(uint8_t *buf, size_t len, void *cb_ctx);
 void enter_mode(system_state_t);
 static system_state_t read_mode_switch(void);
-
 
 
 void i2s_task (void *arg) {
@@ -112,40 +111,39 @@ void i2s_task (void *arg) {
     i2s_channel_init_std_mode(tx_chan, &i2s_config);
     i2s_channel_enable(tx_chan);
 
-
     const float base_freq = 200.0f;
-    float t = 0.0f;
+    float phaseL = 0.0f;
+    float phaseR = 0.0f;
     const float sample_rate = 44100.0f;
     const int BUFFER_SIZE = 256;
     int16_t buffer[BUFFER_SIZE * 2];
-
 
     while (1) {
 
         if (current_mode == MODE_LISSAJOUS) {
 
+            float fL = base_freq;
+            float fR = base_freq * freqRatio;
+
             for (int i = 0; i < BUFFER_SIZE; i++) {
 
-                float fL = base_freq;
-                float fR = base_freq * freqRatio;
-
-                float sampleL = sinf(2.0f * PI * fL * t);
-                float sampleR = sinf(2.0f * PI * fR * t + phaseDiff);
+                float sampleL = sinf(phaseL);
+                float sampleR = sinf(phaseR + phaseDiff);
 
                 buffer[i*2 + 0] = (int16_t)(sampleL * 0x7FFF);
                 buffer[i*2 + 1] = (int16_t)(sampleR * 0x7FFF);
 
-                // printf("Ratio: %f\tL: %f\tR: %f\n", freqRatio, sampleL, sampleR);
-                // printf("L_16: %d\tR_16: %d", buffer[i*2+0], buffer[i*2+1]);
+                phaseL += 2.0f * PI * fL / sample_rate;
+                phaseR += 2.0f * PI * fR / sample_rate;
 
-                t+= 1.0f/sample_rate;
+                if (phaseL >= 2.0f * PI) phaseL -= 2.0f * PI;
+                if (phaseR >= 2.0f * PI) phaseR -= 2.0f * PI;
+
             }
 
-        size_t bytes_written;
-        i2s_channel_write(tx_chan, buffer, sizeof(buffer), &bytes_written, portMAX_DELAY);
-        // printf("Bytes Written: %d\n", bytes_written);
+            size_t bytes_written;
+            i2s_channel_write(tx_chan, buffer, sizeof(buffer), &bytes_written, portMAX_DELAY);
 
-        vTaskDelay(1);
 
         } else if (current_mode == MODE_AUDIO_INPUT) {
 
@@ -158,8 +156,8 @@ void i2s_task (void *arg) {
             uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(
                 audio_ringbuf,
                 &bytes_available,
-                pdMS_TO_TICKS(20),
-                sizeof(buffer)
+                pdMS_TO_TICKS(20),  // Block up to 20ms waiting for data; sizeof(buffer) caps the read to our
+                sizeof(buffer)      // output buffer size. If no data arrives we loop and retry rather than stall.
             );
 
             if (data && bytes_available > 0) {
@@ -168,29 +166,16 @@ void i2s_task (void *arg) {
                 vRingbufferReturnItem(audio_ringbuf, data);
             }
 
-
-
         } else {
             vTaskDelay(1);
         }
-
-        
-
-
     }
-
-
 }
-
-
-
-
 
 void adc_task(void *arg) {
 
 
     // Configure ADC using oneshot
-
     adc_oneshot_unit_handle_t adc_handle;
 
     adc_oneshot_unit_init_cfg_t init_config = {
@@ -204,10 +189,9 @@ void adc_task(void *arg) {
         .bitwidth = ADC_BITWIDTH_12,
     };
 
-    adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_3, &chan_cfg);
+    adc_oneshot_config_channel(adc_handle, FREQ_ADC_CHANNEL, &chan_cfg);
 
-    adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_4, &chan_cfg);
-
+    adc_oneshot_config_channel(adc_handle, PHASE_ADC_CHANNEL, &chan_cfg);
 
     adc_cali_handle_t cali_handle;
 
@@ -225,55 +209,30 @@ void adc_task(void *arg) {
         int raw_freq, mv_freq;
         int raw_phase, mv_phase;
 
-        adc_oneshot_read(adc_handle, ADC_CHANNEL_3, &raw_freq);
-        adc_oneshot_read(adc_handle, ADC_CHANNEL_4, &raw_phase);
+        adc_oneshot_read(adc_handle, FREQ_ADC_CHANNEL, &raw_freq);
+        adc_oneshot_read(adc_handle, PHASE_ADC_CHANNEL, &raw_phase);
 
-        adc_cali_raw_to_voltage(cali_handle, raw_freq, &mv_freq); // calibrates raw ADC values to mV
+        adc_cali_raw_to_voltage(cali_handle, raw_freq, &mv_freq); // Calibrates raw ADC values to mV
         adc_cali_raw_to_voltage(cali_handle, raw_phase, &mv_phase);
 
         mv_freq = adc_hysteresis(&freq_ctrl, mv_freq);
         mv_phase = adc_hysteresis(&phase_ctrl, mv_phase);
 
-        float freq_norm = adc_smooth(&freq_ctrl, mv_freq) / 3200.0f;
-        float phase_norm = adc_smooth(&phase_ctrl, mv_phase) / 3200.0f;
+        float freq_norm = adc_smooth(&freq_ctrl, mv_freq) / ADC_MV_MAX;     // Normalizes from 0-1
+        float phase_norm = adc_smooth(&phase_ctrl, mv_phase) / ADC_MV_MAX;
 
         freqRatio = get_ratio(freq_norm);
         phaseDiff = get_phase_diff(phase_norm);
 
-
-        /*         POT DEBUGS
-        if (count > 99) {
-            printf("raw_freq: %d\traw_phase: %d\n", raw_freq, raw_phase);
-            fflush(stdout);
-
-            printf("mv_freq: %d\tmv_phase: %d\n", mv_freq, mv_phase);
-            fflush(stdout);
-
-            printf("Freq Ratio: %.2f\tPhase Diff: %.2f\n", freqRatio, phaseDiff);
-            fflush(stdout);
-
-            count = 0;
-        } 
-        */
-
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
 
 }
 
-
-
-
-
-
-
-
-
-
 void audio_input_task(void *arg) {
 
-    // Make ring buffer
+    // Make ring buffer, computer puts data in back while DAC picks up data from front
     audio_ringbuf = xRingbufferCreate(UAC_RX_BUFSIZE, RINGBUF_TYPE_BYTEBUF);
 
     // Configure and start UAC
@@ -287,19 +246,16 @@ void audio_input_task(void *arg) {
 
     uac_device_init(&uac_cfg);
 
+    // Task stays alive to keep UAC initialized; audio data is handled via uac_output_callback
     while (1) {
         vTaskDelay(portMAX_DELAY);
     }
-
-
-
 }
 
 void app_main(void)
 {
 
     // Configuring GPIO
-
     gpio_set_direction(LRCK_PIN, GPIO_MODE_OUTPUT);
     gpio_set_direction(DOUT_PIN, GPIO_MODE_OUTPUT);
     gpio_set_direction(BCK_PIN, GPIO_MODE_OUTPUT);
@@ -319,7 +275,6 @@ void app_main(void)
     gpio_config(&io_conf);
 
     // Start persistent i2s task and enter into default mode
-
     xTaskCreate(
             i2s_task,
             "I2S_task",
@@ -343,12 +298,9 @@ void app_main(void)
     }
 }
 
-
-
 ////////////////// Helper Functions //////////////////
 
-
-#define ADC_HYST 10 // Amount of millivolts in order to cause change in output value
+#define ADC_HYST 10     // Amount of millivolts in order to cause change in output value
 
 int adc_hysteresis(adc_ctrl_t *c, int raw)
 {
@@ -365,27 +317,25 @@ int adc_hysteresis(adc_ctrl_t *c, int raw)
 
 float adc_smooth(adc_ctrl_t *c, int val) {
 
-    c->smooth = 0.05f * c->smooth + 0.95f * val;
+    c->smooth = 0.05f * c->smooth + 0.95f * val; // 5% old, 95% new creates an exponential moving average
     return c->smooth;
 
 }
 
 // Translate millivolts to ratio between frequencies
-
 float get_ratio(float freq_norm) {
 
-    if (freq_norm < 1.0f/8.0f) return 1.0f;
-    if (freq_norm < 2.0f/8.0f) return 2.0f;
-    if (freq_norm < 3.0f/8.0f) return 3.0f;
-    if (freq_norm < 4.0f/8.0f) return 4.0f;
-    if (freq_norm < 5.0f/8.0f) return 0.5f;
-    if (freq_norm < 6.0f/8.0f) return 1.5f;
-    if (freq_norm < 7.0f/8.0f) return 4.0f/3.0f;
-    return 6.0f/5.0f;
+    if (freq_norm < 1.0f/8.0f) return 1.0f;         // 1:1 ratio
+    if (freq_norm < 2.0f/8.0f) return 2.0f;         // 2:1 ratio
+    if (freq_norm < 3.0f/8.0f) return 3.0f;         // 3:1 ratio
+    if (freq_norm < 4.0f/8.0f) return 4.0f;         // 4:1 ratio
+    if (freq_norm < 5.0f/8.0f) return 0.5f;         // 1:2 ratio
+    if (freq_norm < 6.0f/8.0f) return 1.5f;         // 3:2 ratio
+    if (freq_norm < 7.0f/8.0f) return 4.0f/3.0f;    // 4:3 ratio
+    return 6.0f/5.0f;                               // 6:5 ratio
 }
 
 // Translate millivolts to phase difference
-
 float get_phase_diff(float phase_norm) {
 
     if (phase_norm < 1.0f/8.0f) return 0;
@@ -403,18 +353,20 @@ float get_phase_diff(float phase_norm) {
 static esp_err_t uac_output_callback(uint8_t *buf, size_t len, void *arg) {
 
     if (audio_ringbuf) {
-        xRingbufferSend(audio_ringbuf, buf, len, 0);
+        xRingbufferSend(audio_ringbuf, buf, len, 0); // Timeout of 0 drops data if the buffer is full
     }
 
     return ESP_OK;
 }
 
 
-
 ////////////////// State Machine Functions //////////////////
 
 void enter_mode(system_state_t mode) {
 
+
+
+    // Cleans up tasks that are no longer in use, lowers task load before transitioning to new mode
     if (adc_sampling_handle) {
         vTaskDelete(adc_sampling_handle);
         adc_sampling_handle = NULL;
@@ -426,15 +378,13 @@ void enter_mode(system_state_t mode) {
     }
 
     if (audio_ringbuf) {
-    vRingbufferDelete(audio_ringbuf);
-    audio_ringbuf = NULL;
-}
+        vRingbufferDelete(audio_ringbuf);
+        audio_ringbuf = NULL;
+    }
 
     switch (mode) {
 
         case MODE_LISSAJOUS:
-
-            printf("Entering Lissajous State!\n");
 
             xTaskCreate(
             adc_task,
@@ -448,8 +398,6 @@ void enter_mode(system_state_t mode) {
             break;
 
         case MODE_AUDIO_INPUT:
-            
-            printf("Entering Audio Input State!\n");
 
             xTaskCreate(
             audio_input_task,
@@ -466,7 +414,6 @@ void enter_mode(system_state_t mode) {
 }
 
 // Reads mode switch on board to determine requested mode
-
 static system_state_t read_mode_switch(void) {
     return gpio_get_level(MODE_SWITCH_PIN) ? MODE_AUDIO_INPUT : MODE_LISSAJOUS;
 }
