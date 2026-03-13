@@ -17,7 +17,6 @@
 #include <math.h>
 #include <usb_device_uac.h>
 #include <freertos/ringbuf.h>
-#include "esp_log.h"
 
 // Hardware Pins
 #define LRCK_PIN GPIO_NUM_35
@@ -29,7 +28,10 @@
 #define FREQ_PIN GPIO_NUM_5
 #define PHASE_ADC_CHANNEL ADC_CHANNEL_3
 #define FREQ_ADC_CHANNEL ADC_CHANNEL_4
-#define MODE_SWITCH_PIN GPIO_NUM_9
+#define MODE_SWITCH_PIN GPIO_NUM_6
+
+#define OLED_SDA_PIN GPIO_NUM_1
+#define OLED_SCL_PIN GPIO_NUM_2
 
 // Constants
 #define PI 3.14159265358979f
@@ -37,12 +39,14 @@
 #define ADC_MV_MAX 3200.0f
 
 // Global State
+static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
 static RingbufHandle_t audio_ringbuf = NULL;
 
 static i2s_chan_handle_t tx_chan;
 
-volatile float freq_ratio = 1.0f;       // Shared between i2s_task and adc_task. Volatile prevents the compiler
-volatile float phase_diff = PI / 2.0f;  // from optimizing reads into a register, ensuring the latest value is always used.
+float freq_ratio = 1.0f;
+float phase_diff = PI / 2.0f;
 
 typedef struct {
     int last_raw;
@@ -56,6 +60,13 @@ typedef enum {
     MODE_LISSAJOUS = 0,
     MODE_AUDIO_INPUT = 1
 } system_state_t;
+
+typedef struct {
+    adc_oneshot_unit_handle_t adc_handle;
+    adc_cali_handle_t cali_handle;
+} adc_task_arg_t;
+
+static adc_task_arg_t adc_handles = {0};
 
 TaskHandle_t adc_sampling_handle = NULL;
 TaskHandle_t audio_input_handle = NULL;
@@ -88,12 +99,12 @@ void i2s_task (void *arg) {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
 
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-            I2S_DATA_BIT_WIDTH_16BIT,
+            I2S_DATA_BIT_WIDTH_16BIT,   // 96 dB SNR is sufficient for scope visualization; higher bit depths offer no perceptible improvement at 210-840 Hz
             I2S_SLOT_MODE_STEREO
         ),
 
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
+            .mclk = SCK_PIN,
             .bclk = BCK_PIN,
             .ws = LRCK_PIN,
             .dout = DOUT_PIN,
@@ -120,11 +131,16 @@ void i2s_task (void *arg) {
 
         if (current_mode == MODE_LISSAJOUS) {
 
+            portENTER_CRITICAL(&mux);
+            float f_ratio = freq_ratio;
+            float f_phase = phase_diff;
+            portEXIT_CRITICAL(&mux);
+
             float fL = base_freq;
 
             for (int i = 0; i < BUFFER_SIZE; i++) {
                 float sampleL = sinf(phaseL);
-                float sampleR = sinf(phaseL * freq_ratio + phase_diff);
+                float sampleR = sinf(phaseL * f_ratio + f_phase);
 
                 buffer[i*2 + 0] = (int16_t)(sampleL * 0x7FFF);
                 buffer[i*2 + 1] = (int16_t)(sampleR * 0x7FFF);
@@ -139,23 +155,24 @@ void i2s_task (void *arg) {
 
         } else if (current_mode == MODE_AUDIO_INPUT) {
 
-            if (audio_ringbuf == NULL) {
+            portENTER_CRITICAL(&mux);
+            RingbufHandle_t rb = audio_ringbuf;
+            portEXIT_CRITICAL(&mux);
+
+            if (rb == NULL) {
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
 
             size_t bytes_available;
             uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(
-                audio_ringbuf,
-                &bytes_available,
-                pdMS_TO_TICKS(20),  // Block up to 20ms waiting for data; sizeof(buffer) caps the read to our
-                sizeof(buffer)      // output buffer size. If no data arrives we loop and retry rather than stall.
+                rb, &bytes_available, pdMS_TO_TICKS(20), sizeof(buffer)
             );
 
             if (data && bytes_available > 0) {
                 size_t bytes_written;
                 i2s_channel_write(tx_chan, data, bytes_available, &bytes_written, portMAX_DELAY);
-                vRingbufferReturnItem(audio_ringbuf, data);
+                vRingbufferReturnItem(rb, data);
             }
 
         } else {
@@ -167,46 +184,16 @@ void i2s_task (void *arg) {
 
 void adc_task(void *arg) {
 
-    // Initialize ADC1 in oneshot mode for reading frequency and phase control potentiometers.
-    // Oneshot mode is used instead of continuous mode since we only need periodic readings
-    // at 10ms intervals, not a high-speed stream.
-    adc_oneshot_unit_handle_t adc_handle;
-
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1
-    };
-
-    adc_oneshot_new_unit(&init_config, &adc_handle);
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-
-    adc_oneshot_config_channel(adc_handle, FREQ_ADC_CHANNEL, &chan_cfg);
-
-    adc_oneshot_config_channel(adc_handle, PHASE_ADC_CHANNEL, &chan_cfg);
-
-    adc_cali_handle_t cali_handle;
-
-    adc_cali_curve_fitting_config_t cali_cfg = {
-        .unit_id = ADC_UNIT_1,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-
-    adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali_handle);
-
     while (1) {
 
         int raw_freq, mv_freq;
         int raw_phase, mv_phase;
 
-        adc_oneshot_read(adc_handle, FREQ_ADC_CHANNEL, &raw_freq);
-        adc_oneshot_read(adc_handle, PHASE_ADC_CHANNEL, &raw_phase);
+        adc_oneshot_read(adc_handles.adc_handle, FREQ_ADC_CHANNEL, &raw_freq);
+        adc_oneshot_read(adc_handles.adc_handle, PHASE_ADC_CHANNEL, &raw_phase);
 
-        adc_cali_raw_to_voltage(cali_handle, raw_freq, &mv_freq);   // Calibrates raw ADC values to mV
-        adc_cali_raw_to_voltage(cali_handle, raw_phase, &mv_phase);
+        adc_cali_raw_to_voltage(adc_handles.cali_handle, raw_freq, &mv_freq);   // Calibrates raw ADC values to mV
+        adc_cali_raw_to_voltage(adc_handles.cali_handle, raw_phase, &mv_phase);
 
         mv_freq = adc_hysteresis(&freq_ctrl, mv_freq);
         mv_phase = adc_hysteresis(&phase_ctrl, mv_phase);
@@ -214,8 +201,10 @@ void adc_task(void *arg) {
         float freq_norm = adc_smooth(&freq_ctrl, mv_freq) / ADC_MV_MAX;     // Normalizes from 0-1
         float phase_norm = adc_smooth(&phase_ctrl, mv_phase) / ADC_MV_MAX;
 
+        portENTER_CRITICAL(&mux);
         freq_ratio = get_ratio(freq_norm);
         phase_diff = get_phase_diff(phase_norm);
+        portEXIT_CRITICAL(&mux);
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -247,9 +236,6 @@ void app_main(void)
 {
 
     // Configuring GPIO
-    gpio_set_direction(PHASE_PIN, GPIO_MODE_INPUT);
-    gpio_set_direction(FREQ_PIN, GPIO_MODE_INPUT);
-
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << MODE_SWITCH_PIN),
         .mode = GPIO_MODE_INPUT,
@@ -258,6 +244,28 @@ void app_main(void)
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf);
+
+    // Initialize ADC1 in oneshot mode for reading frequency and phase control potentiometers.
+    // Oneshot mode is used instead of continuous mode since we only need periodic readings
+    // at 10ms intervals, not a high-speed stream.
+    adc_oneshot_unit_init_cfg_t init_config = {
+    .unit_id = ADC_UNIT_1
+    };
+    adc_oneshot_new_unit(&init_config, &adc_handles.adc_handle);
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    adc_oneshot_config_channel(adc_handles.adc_handle, FREQ_ADC_CHANNEL, &chan_cfg);
+    adc_oneshot_config_channel(adc_handles.adc_handle, PHASE_ADC_CHANNEL, &chan_cfg);
+
+    adc_cali_curve_fitting_config_t cali_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    adc_cali_create_scheme_curve_fitting(&cali_cfg, &adc_handles.cali_handle);
 
     // Start persistent i2s task and enter into default mode
     xTaskCreate(
@@ -357,8 +365,11 @@ void enter_mode(system_state_t mode) {
     }
 
     if (audio_ringbuf) {
-        vRingbufferDelete(audio_ringbuf);
+        portENTER_CRITICAL(&mux);
+        RingbufHandle_t rb_to_delete = audio_ringbuf;
         audio_ringbuf = NULL;
+        portEXIT_CRITICAL(&mux);
+        if (rb_to_delete) vRingbufferDelete(rb_to_delete);
     }
 
     switch (mode) {
@@ -366,25 +377,25 @@ void enter_mode(system_state_t mode) {
         case MODE_LISSAJOUS:
 
             xTaskCreate(
-            adc_task,
-            "ADC_Sampling",
-            4096,
-            NULL,
-            3,
-            &adc_sampling_handle
-            ); 
+                adc_task, 
+                "ADC_Sampling", 
+                4096, 
+                NULL, 
+                3, 
+                &adc_sampling_handle
+            );
 
             break;
 
         case MODE_AUDIO_INPUT:
 
             xTaskCreate(
-            audio_input_task,
-            "Audio_Input",
-            8192,
-            NULL,
-            5,
-            &audio_input_handle
+                audio_input_task,
+                "Audio_Input",
+                8192,
+                NULL,
+                5,
+                &audio_input_handle
             );
 
             break;
