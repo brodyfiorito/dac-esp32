@@ -55,25 +55,24 @@ It's a classic technique for visualizing the relationship between two signals, a
 ### Schematics
 All schematics were captured in Altium Designer. PCB layout is complete and awaiting fabrication.
 
-<img width="800" alt="Sheet 1" src="https://github.com/user-attachments/assets/6a980bcc-2508-4cd6-8966-80163abe863d" />
+<img width="800" alt="Sheet 1" src="https://github.com/user-attachments/assets/ebac3af3-9716-4182-a427-cd7d4e718d77" />
 
 _Sheet 1 — Input/Output: Dual USB-C connectors (speaker and programming), CP2102-GMR USB-to-UART bridge for MCU programming, phase difference and frequency potentiometer inputs with R-C filtering, left and right DAC output headers with 1k series resistors and 15nF shunt capacitors, and USB D+/D− data lines with 22Ω series resistors._
 
 
-<img width="800" alt="Sheet 2" src="https://github.com/user-attachments/assets/40fb2dea-fd27-4487-9d91-7cf5b3c41dde" />
+<img width="800" alt="Sheet 2" src="https://github.com/user-attachments/assets/1af3767e-cbb8-49c2-a063-8ce5d32a583e" />
 
 _Sheet 2 — Power: 5V to 3.3V regulation via TLV75733PDYDR LDO. Input is protected by a TVS diode with 1µF and 0.1µF decoupling capacitors. The EN pin is controlled by a 2.2kΩ/5kΩ resistor divider tied to the XSMT soft-mute signal. Output is decoupled with a 10µF capacitor, and a power indicator LED is driven through a 680Ω current-limiting resistor._
 
 
-<img width="800" alt="Sheet 3" src="https://github.com/user-attachments/assets/63065a3a-e260-4ad4-8e4a-344aa9e1ba69" />
+<img width="800" alt="Sheet 3" src="https://github.com/user-attachments/assets/755c4826-67df-4663-9ebc-177a7d04ad9e" />
 
 _Sheet 3 — Audio: PCM5102A stereo DAC receiving I²S signals (SCK, BCK, DOUT, LRCK) from the ESP32-S3. AVDD, CPVDD, and DVDD are all supplied from 3.3V with 10µF and 0.1µF decoupling. Internal charge pump is supported by 2.2µF capacitors on CAPP and CAPM. Left (OUTL) and right (OUTR) analog outputs are routed to the output header section. XSMT soft-mute is tied to the power section EN divider._
 
 
-<img width="800" alt="Sheet 4" src="https://github.com/user-attachments/assets/52cfc1fc-52ae-44ad-b07f-2947303b3823" />
+<img width="800" alt="Sheet 4" src="https://github.com/user-attachments/assets/4090af95-608c-4dc4-91e5-9bf74b33e29a" />
 
 _Sheet 4 — MCU: ESP32-S3-WROOM-1-N4 with 10µF and 0.1µF decoupling on the 3.3V rail. I²S signals (LRCK, DOUT, BCK, SCK) are routed to the PCM5102A. UART RX/TX connect to the CP2102-GMR programming bridge via RTS/DTR auto-reset circuit — RTS and DTR signals drive NPN transistors through base resistors to control the EN and IO0 pins for automatic bootloader entry. USB D+/D− are broken out for USB audio (speaker) mode. Analog inputs receive the phase difference and frequency potentiometer signals. A mode selection switch with pull-down resistor and debounce capacitor is included. I²C lines (SCL, SDA) are broken out for the optional OLED display with decoupling on the supply line._
-
 
 ### Bill of Materials
 | Ref | Description | Value / Part | Package | Qty |
@@ -108,11 +107,17 @@ _Sheet 4 — MCU: ESP32-S3-WROOM-1-N4 with 10µF and 0.1µF decoupling on the 3.
 ### PCB Layout
 
 
+<img width="800" alt="PCB Top Layer" src="https://github.com/user-attachments/assets/20369097-93da-4608-8003-dd4fcb3e33fb" />
+
 _Top copper layer showing primary signal and power routing. Stitching vias connect the top and bottom ground pours at regular intervals to minimize ground impedance and keep return current loops short._
 
 
+<img width="800" alt="PCB Bottom Layer" src="https://github.com/user-attachments/assets/297473ba-9b49-482c-accc-0066461cce1c" />
+
 _Bottom copper layer. The continuous ground pour provides a low-impedance return path and acts as an electric field shield across the full board area._
 
+
+<img width="800" alt="PCB 3D View" src="https://github.com/user-attachments/assets/7a405fde-47a3-405e-961c-7ab39e7ee429" />
 
 _3D render of the assembled board. Controls (phase, frequency, mode) are grouped on the left edge; the DAC and analog outputs are isolated to the right edge away from the MCU and power circuitry._
 
@@ -131,14 +136,12 @@ _3D render of the assembled board. Controls (phase, frequency, mode) are grouped
 Both layers carry continuous ground pours. The bottom ground plane serves as a low-impedance return path and voltage reference for analog signals, while the surrounding copper on both layers reduces capacitive coupling of external noise onto sensitive traces.
 
 #### Placement
-The CP2102 USB-UART bridge sits adjacent to the programming USB-C connector to keep the USB differential pair short. Decoupling capacitors are placed as close as possible to each IC's power pins to minimize supply rail loop inductance.
-
-The stereo DAC and analog output network are isolated to one edge of the board, maximizing separation from the ESP32 and power circuitry.
+The CP2102 USB-UART bridge sits adjacent to the programming USB-C connector to keep the USB differential pair short. Decoupling capacitors are placed as close as possible to each IC's power pins to minimize supply rail loop inductance. The stereo DAC and analog output network are isolated to one edge of the board, maximizing separation from the ESP32 and power circuitry. The ESP32-S3 module antenna keepout area is free of copper pours and routing on all layers.
 
 #### Routing
-Ground stitching vias are distributed across the board to connect the top and bottom ground pours, reducing ground impedance and keeping return current loops short
-Signal traces crossing power traces do so at 90° to minimize inter-layer capacitive coupling
-Analog output traces are routed away from digital and power traces for the full length of the board
+Ground vias are distributed across the board to connect the top and bottom ground pours, reducing ground impedance and keeping return current loops short.
+Signal traces crossing power traces do so at 90° to minimize inter-layer capacitive coupling.
+Analog output traces are routed away from digital and power traces for the full length of the board.
 
 ## Controls
 
@@ -204,9 +207,6 @@ _Rigol DS1102E oscilloscope showing early firmware output. CH1 (yellow) is the s
 
 <video src="https://github.com/user-attachments/assets/7f4eb666-647e-48f4-968a-9c4041df8248" controls width="600"></video>
 _Rigol DS1102E in XY mode. 210Hz on both channels with a phase offset producing a rotating ellipse pattern. CH1 (signal generator) on the X axis, CH2 (PCM5102A OUTR) on the Y axis._
-
-### PCB Design
-The schematic and PCB layout was completed in Altium Designer. The design integrates the ESP32-S3, PCM5102A DAC, TLV75733PDYDR 5V to 3.3V LDO, probe outputs, and USB-C connectors onto a single board.
 
 ## Roadmap
 - [x] Complete PCB layout in Altium Designer
