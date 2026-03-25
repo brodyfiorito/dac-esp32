@@ -17,6 +17,8 @@
 #include <math.h>
 #include <usb_device_uac.h>
 #include <freertos/ringbuf.h>
+#include <driver/i2c_master.h>
+#include <u8g2.h>
 
 // Hardware Pins
 #define LRCK_PIN GPIO_NUM_35
@@ -71,6 +73,7 @@ static adc_task_arg_t adc_handles = {0};
 TaskHandle_t adc_sampling_handle = NULL;
 TaskHandle_t audio_input_handle = NULL;
 TaskHandle_t i2s_handle = NULL;
+TaskHandle_t display_handle = NULL;
 
 static system_state_t current_mode = MODE_LISSAJOUS;
 static system_state_t requested_mode = MODE_LISSAJOUS;
@@ -232,6 +235,93 @@ void audio_input_task(void *arg) {
     }
 }
 
+// OLED display driver setup
+typedef struct {
+    i2c_master_dev_handle_t dev;
+    uint8_t buf[128];
+    uint8_t buf_idx;
+} u8g2_hal_t;
+
+static u8g2_hal_t hal = {0};
+
+uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr) {
+    switch (msg) {
+        case U8X8_MSG_BYTE_INIT:
+            break;
+        case U8X8_MSG_BYTE_START_TRANSFER:
+            hal.buf_idx = 0;
+            break;
+        case U8X8_MSG_BYTE_SEND:
+            memcpy(&hal.buf[hal.buf_idx], arg_ptr, arg_int);
+            hal.buf_idx += arg_int;
+            break;
+        case U8X8_MSG_BYTE_END_TRANSFER:
+            i2c_master_transmit(hal.dev, hal.buf, hal.buf_idx, pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(1));
+            break;
+    }
+    return 1;
+}
+
+uint8_t u8g2_esp32_gpio_delay_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr) {
+    switch (msg) {
+        case U8X8_MSG_DELAY_MILLI:
+            vTaskDelay(pdMS_TO_TICKS(arg_int));
+            break;
+    }
+    return 1;
+}
+
+void display_task(void *arg) {
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = OLED_SDA_PIN,
+        .scl_io_num = OLED_SCL_PIN,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus;
+    i2c_new_master_bus(&bus_config, &bus);
+
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = 0x3C,
+        .scl_speed_hz = 100000,
+    };
+    i2c_master_dev_handle_t dev;
+    i2c_master_bus_add_device(bus, &dev_config, &dev);
+
+    hal.dev = dev;
+
+    u8g2_t u8g2;
+    u8g2_Setup_ssd1306_i2c_128x64_noname_f(&u8g2, U8G2_R0, u8g2_esp32_i2c_byte_cb, u8g2_esp32_gpio_delay_cb);
+    u8g2_InitDisplay(&u8g2);
+    u8g2_SetPowerSave(&u8g2, 0);
+
+    char buf[32];
+    while (1) {
+        portENTER_CRITICAL(&mux);
+        float f_ratio = freq_ratio;
+        float f_phase = phase_diff;
+        portEXIT_CRITICAL(&mux);
+
+        u8g2_ClearBuffer(&u8g2);
+        u8g2_SetFont(&u8g2, u8g2_font_logisoso16_tr);
+
+        snprintf(buf, sizeof(buf), "Ratio: %.2f", f_ratio);
+        u8g2_DrawStr(&u8g2, 0, 20, buf);
+
+        float phase_over_pi = f_phase / PI;
+        snprintf(buf, sizeof(buf), "Phase: %.2fpi", phase_over_pi);
+        u8g2_DrawStr(&u8g2, 0, 44, buf);
+
+        u8g2_SendBuffer(&u8g2);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+
 void app_main(void)
 {
 
@@ -245,6 +335,9 @@ void app_main(void)
     };
     gpio_config(&io_conf);
 
+    // Configure I2C for display
+
+
     // Initialize ADC1 in oneshot mode for reading frequency and phase control potentiometers.
     // Oneshot mode is used instead of continuous mode since we only need periodic readings
     // at 10ms intervals, not a high-speed stream.
@@ -253,30 +346,42 @@ void app_main(void)
     };
     adc_oneshot_new_unit(&init_config, &adc_handles.adc_handle);
 
-    adc_oneshot_chan_cfg_t chan_cfg = {
+    adc_oneshot_chan_cfg_t chan_config = {
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_12,
     };
-    adc_oneshot_config_channel(adc_handles.adc_handle, FREQ_ADC_CHANNEL, &chan_cfg);
-    adc_oneshot_config_channel(adc_handles.adc_handle, PHASE_ADC_CHANNEL, &chan_cfg);
+    adc_oneshot_config_channel(adc_handles.adc_handle, FREQ_ADC_CHANNEL, &chan_config);
+    adc_oneshot_config_channel(adc_handles.adc_handle, PHASE_ADC_CHANNEL, &chan_config);
 
-    adc_cali_curve_fitting_config_t cali_cfg = {
+    adc_cali_curve_fitting_config_t cali_config = {
         .unit_id = ADC_UNIT_1,
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_12,
     };
-    adc_cali_create_scheme_curve_fitting(&cali_cfg, &adc_handles.cali_handle);
+    adc_cali_create_scheme_curve_fitting(&cali_config, &adc_handles.cali_handle);
 
-    // Start persistent i2s task and enter into default mode
+    // Start persistent i2s task
     xTaskCreate(
             i2s_task,
             "I2S_task",
             8192,
             NULL,
-            5,
+            7,
             &i2s_handle
-        ); 
+        );
 
+    // Start persistent OLED display task
+    xTaskCreate(
+        display_task,
+        "Display_task",
+        4096,
+        NULL,
+        2,
+        &display_handle
+    );
+
+
+    // Enter into default mode
     enter_mode(MODE_LISSAJOUS);
 
     while (1) {
@@ -341,11 +446,11 @@ float get_phase_diff(float phase_norm) {
 }
 
 static esp_err_t uac_output_callback(uint8_t *buf, size_t len, void *arg) {
-
     if (audio_ringbuf) {
-        xRingbufferSend(audio_ringbuf, buf, len, 0);    // Timeout of 0 drops data if the buffer is full
+        BaseType_t higher_priority_woken = pdFALSE;
+        xRingbufferSendFromISR(audio_ringbuf, buf, len, &higher_priority_woken);
+        portYIELD_FROM_ISR(higher_priority_woken);
     }
-
     return ESP_OK;
 }
 
@@ -369,7 +474,8 @@ void enter_mode(system_state_t mode) {
         RingbufHandle_t rb_to_delete = audio_ringbuf;
         audio_ringbuf = NULL;
         portEXIT_CRITICAL(&mux);
-        if (rb_to_delete) vRingbufferDelete(rb_to_delete);
+        vTaskDelay(pdMS_TO_TICKS(50));  // let i2s_task finish any in-progress receive
+        vRingbufferDelete(rb_to_delete);
     }
 
     switch (mode) {
@@ -381,7 +487,7 @@ void enter_mode(system_state_t mode) {
                 "ADC_Sampling", 
                 4096, 
                 NULL, 
-                3, 
+                6, 
                 &adc_sampling_handle
             );
 
@@ -394,7 +500,7 @@ void enter_mode(system_state_t mode) {
                 "Audio_Input",
                 8192,
                 NULL,
-                5,
+                4,
                 &audio_input_handle
             );
 
