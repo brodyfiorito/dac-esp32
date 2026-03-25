@@ -9,11 +9,12 @@ When two sine waves are fed into the X and Y inputs of an oscilloscope, the resu
 It's a classic technique for visualizing the relationship between two signals, and the motivation behind this project. The device generates both signals digitally using an ESP32-S3 and outputs them through a PCM5102A stereo DAC, producing clean analog sine waves on two independent channels. Frequency ratio and phase offset are controlled via onboard potentiometers, making it a fully self-contained Lissajous generator.
 
 ### Key Features:
+* Custom 2-layer PCB design in Altium Designer
 * Dual-channel sine wave output via I²S audio DAC
 * Real-time frequency ratio and phase offset control
 * FreeRTOS-based firmware with state machine architecture
 * USB-C audio input mode for music visualization.
-* Custom 2-layer PCB design in Altium Designer (in progress)
+* OLED display of frequency ratio and phase difference
 
 ## Hardware
 ### System Architecture
@@ -23,7 +24,7 @@ It's a classic technique for visualizing the relationship between two signals, a
 | DAC   | PCM5102A    | 32-bit stereo audio DAC, I²S input      |
 | Power   | TLV75733PDYDR    | 1A LDO regulator; ESP32-S3 and PCM5102A draw well under 500mA combined         |
 | Input   | 2x USB-C    | One port used for programming the MCU, other used as a speaker         |
-| Output   | 4x PCB Headers + JST male header   | Left and right DAC output signals, plus two dedicated ground headers for oscilloscope probe referencing. OLED display port         |
+| Output   | 4x PCB Headers + JST male header   | Left and right DAC output signals, plus two dedicated ground headers for oscilloscope probe referencing. OLED I²C port         |
 
 ### Design Decisions
 
@@ -52,7 +53,7 @@ It's a classic technique for visualizing the relationship between two signals, a
 
 
 ### Schematics
-All schematics were captured in Altium Designer. PCB layout is currently in progress.
+All schematics were captured in Altium Designer. PCB layout is complete and awaiting fabrication.
 
 <img width="800" alt="Sheet 1" src="https://github.com/user-attachments/assets/6a980bcc-2508-4cd6-8966-80163abe863d" />
 
@@ -82,27 +83,63 @@ _Sheet 4 — MCU: ESP32-S3-WROOM-1-N4 with 10µF and 0.1µF decoupling on the 3.
 | PROG | USB-to-UART Bridge | CP2102-GMR | 28-QFN | 1 |
 | U1 | LDO Regulator | TLV75733PDYDR | SOT-23-5 | 1 |
 | J1, J2 | USB-C Connector | 2012670005 | SMD RA | 2 |
-| P1 | OLED Header | JST 4-Pin 2mm | 4-Pin THD | 1 |
+| P1 | OLED Header | Male Header 2mm 1×4 | 4-Pin THD | 1 |
 | Q1, Q2 | NPN Transistor | SOT-1123 | SOT-1123 | 2 |
-| R12 | Phase Potentiometer | ALPS RK11K1140A3L | 4-Pin THD | 1 |
-| R13 | Frequency Potentiometer | ALPS RK11K1140A3L | 4-Pin THD | 1 |
-| R1–R4, R15 | Resistor | 5kΩ | 0603 | 5 |
-| R6, R7, R10, R11 | Resistor | 1kΩ 1% 0.1W | 0603 | 4 |
-| R8, R9 | Resistor | 22Ω 5% 0.1W | 0603 | 2 |
-| R14 | Resistor | 2.2kΩ 1% 0.1W | 0603 | 1 |
-| R16 | Resistor | 680Ω 5% | 0603 | 1 |
-| R17–R21 | Resistor | 10kΩ 0.1% | 0603 | 5 |
-| C1, C7, C19 | Capacitor | 1µF | 0603 | 3 |
-| C2, C3, C4, C8, C10, C11, C14, C15, C17 | Capacitor | 0.1µF X7R | 0603 | 9 |
-| C5, C6 | Capacitor | 15nF X7R | 0603 | 2 |
-| C9, C16, C18 | Capacitor | 10µF X5R | 0603 | 3 |
-| C12, C13 | Capacitor | 2.2µF X7S | 0603 | 2 |
-| D1 | TVS Diode | 5V/14V | 2x2 SON | 1 |
-| D2 | LED | Red Clear | 2-SMD | 1 |
+| R11 | Phase Potentiometer | ALPS RK11K1140A3L | 4-Pin THD | 1 |
+| R12 | Frequency Potentiometer | ALPS RK11K1140A3L | 4-Pin THD | 1 |
 | SW1 | Slide Switch | SPST 4A 125V | THD | 1 |
+| R1–R4, R14 | Resistor | 5kΩ | 0603 | 5 |
+| R5, R6, R9, R10 | Resistor | 1kΩ 1% 0.1W | 0603 | 4 |
+| R7, R8 | Resistor | 22Ω 5% 0.1W | 0603 | 2 |
+| R13 | Resistor | 2.2kΩ 1% 0.1W | 0603 | 1 |
+| R15 | Resistor | 680Ω 5% | 0603 | 1 |
+| R16, R17, R18 | Resistor | 10kΩ 0.1% | 0603 | 3 |
+| C1, C7, C18 | Capacitor | 1µF | 0603 | 3 |
+| C2, C3, C4, C9, C10, C11, C14, C16 | Capacitor | 0.1µF X7R | 0603 | 8 |
+| C5, C6 | Capacitor | 15nF X7R | 0603 | 2 |
+| C8, C15, C17 | Capacitor | 10µF X5R | 0603 | 3 |
+| C12, C13 | Capacitor | 2.2µF X7S | 0603 | 2 |
+| D1 | TVS Diode | 5V / 14V | 2×2 SON | 1 |
+| D2 | LED | Red Clear | 2-SMD | 1 |
 | SGND1, SGND2 | Test Point | Black Miniature | — | 2 |
 | XLEFT | Test Point | White Miniature | — | 1 |
 | YRIGHT | Test Point | Red Miniature | — | 1 |
+
+### PCB Layout
+
+
+_Top copper layer showing primary signal and power routing. Stitching vias connect the top and bottom ground pours at regular intervals to minimize ground impedance and keep return current loops short._
+
+
+_Bottom copper layer. The continuous ground pour provides a low-impedance return path and acts as an electric field shield across the full board area._
+
+
+_3D render of the assembled board. Controls (phase, frequency, mode) are grouped on the left edge; the DAC and analog outputs are isolated to the right edge away from the MCU and power circuitry._
+
+
+#### Board Specifications
+| Property | Value |
+|----------|-------|
+| Dimensions | 84 mm × 58 mm |
+| Thickness | 1.6 mm |
+| Finish | HASL |
+| Layers | 2 |
+| Top Layer | Primary signal and power routing |
+| Bottom Layer | Ground plane |
+
+#### Layer Stackup
+Both layers carry continuous ground pours. The bottom ground plane serves as a low-impedance return path and voltage reference for analog signals, while the surrounding copper on both layers reduces capacitive coupling of external noise onto sensitive traces.
+
+#### Placement
+The CP2102 USB-UART bridge sits adjacent to the programming USB-C connector to keep the USB differential pair short. Decoupling capacitors are placed as close as possible to each IC's power pins to minimize supply rail loop inductance.
+
+The stereo DAC and analog output network are isolated to one edge of the board, maximizing separation from the ESP32 and power circuitry.
+
+#### Routing
+Ground stitching vias are distributed across the board to connect the top and bottom ground pours, reducing ground impedance and keeping return current loops short
+Signal traces crossing power traces do so at 90° to minimize inter-layer capacitive coupling
+Analog output traces are routed away from digital and power traces for the full length of the board
+
 ## Controls
 
 The device has three physical controls: two potentiometers and a mode slide switch.
@@ -144,13 +181,14 @@ The device has three physical controls: two potentiometers and a mode slide swit
 
 ## Firmware
 
-The firmware is written in Embedded C using the ESP-IDF framework with FreeRTOS. Sine wave generation uses a phase accumulator, rather than computing sine values from absolute time, each sample increments a floating-point phase register by a step size proportional to the desired frequency, which avoids unbounded growth of the time variable.
+The firmware is written in Embedded C using the ESP-IDF framework with FreeRTOS. Sine wave generation uses a phase accumulator, rather than computing sine values from absolute time, each sample increments a floating-point phase register by a step size proportional to the desired frequency, which avoids unbounded growth of the time variable. I²S is used to communicate with the DAC and I²C is used to communicate with the OLED controller.
 
 ### Architecture Highlights:
 * FreeRTOS task handles I²S DMA buffer filling at audio sample rate
 * State machine manages mode switching
 * Phase accumulator for drift-free, long-term stability
 * Exponential moving average + hysteresis on ADC pot readings to prevent jitter and snap between ratio/phase steps cleanly
+* OLED display continuously updated via I²C with current frequency ratio and phase offset
 
 Built with ESP-IDF v5.5.2
 
@@ -168,13 +206,14 @@ _Rigol DS1102E oscilloscope showing early firmware output. CH1 (yellow) is the s
 _Rigol DS1102E in XY mode. 210Hz on both channels with a phase offset producing a rotating ellipse pattern. CH1 (signal generator) on the X axis, CH2 (PCM5102A OUTR) on the Y axis._
 
 ### PCB Design
-The schematic is complete in Altium Designer and PCB routing is currently underway. The design integrates the ESP32-S3, PCM5102A DAC, TLV75733PDYDR LDO, probe outputs, and USB-C connectors onto a single board.
+The schematic and PCB layout was completed in Altium Designer. The design integrates the ESP32-S3, PCM5102A DAC, TLV75733PDYDR 5V to 3.3V LDO, probe outputs, and USB-C connectors onto a single board.
 
 ## Roadmap
-- [ ] Complete PCB layout in Altium Designer
+- [x] Complete PCB layout in Altium Designer
 - [ ] Fabricate and assemble first PCB revision
 - [ ] Validate both DAC output channels on hardware
 - [x] Explore OLED display for parameter readout
   - [x] Add Hardware to Schematic
-  - [ ] Program Display
+  - [x] Program Display
+  - [ ] Test Display
 - [ ] Enclosure design
